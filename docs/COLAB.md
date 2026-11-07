@@ -71,8 +71,14 @@ Không cần chia sẻ Drive công khai: Colab mount Drive cá nhân qua tài kh
 
 ## 3. Đẩy mã lên GitHub
 
-Tạo repo trống trên GitHub trước. Ví dụ dưới đây áp dụng cho repo local chưa khởi tạo Git.
-Nếu đã có repo, dùng remote/branch hiện tại, không chạy lại `git init` hoặc thêm remote trùng.
+Code đã được đẩy lên repository:
+
+```text
+https://github.com/phamminhhieupc/DEEPLERNING.git
+```
+
+Khi cần cập nhật code từ máy cá nhân, dùng remote/branch hiện tại, không chạy lại
+`git init` hoặc thêm remote trùng:
 
 ```bash
 git -C /home/hieupc/Documents/btlDEEP init
@@ -84,10 +90,10 @@ git -C /home/hieupc/Documents/btlDEEP diff --cached --stat
 git -C /home/hieupc/Documents/btlDEEP commit -m "Add YOLO26 PPE Colab training pipeline"
 ```
 
-Sau đó thêm URL repo thật (thay OWNER và REPO):
+Remote của dự án:
 
 ```bash
-git -C /home/hieupc/Documents/btlDEEP remote add origin https://github.com/OWNER/REPO.git
+git -C /home/hieupc/Documents/btlDEEP remote -v
 git -C /home/hieupc/Documents/btlDEEP push -u origin main
 ```
 
@@ -109,7 +115,7 @@ Các tệp cần có trên repo:
 1. Truy cập https://colab.research.google.com/ → **File → Open notebook → GitHub**.
 2. Dán URL repo vừa push, chọn `train_ppe_colab.ipynb`.
 3. **Runtime → Change runtime type → GPU** (ví dụ T4 nếu tài khoản được cấp).
-4. Trong cell đầu điền URL HTTPS repo thật vào `REPO_URL`.
+4. Repository đã cấu hình sẵn URL `https://github.com/phamminhhieupc/DEEPLERNING.git` trong notebook.
 5. `REF = "main"` dùng nhánh mới nhất, hoặc đặt commit SHA để tái lập chính xác phiên bản.
 6. Chạy lần lượt các cell từ trên xuống.
 
@@ -127,17 +133,17 @@ và các cell tiếp theo; không chèn token vào `REPO_URL` hoặc lưu nó tr
 | Biến notebook | Mặc định | Ý nghĩa |
 |---|---|---|
 | MODEL | yolo26s.pt | Pretrained; dùng yolo26n.pt khi GPU ít VRAM |
-| EPOCHS | 150 | Giới hạn số epoch |
-| PATIENCE | 25 | Dừng sau 25 epoch val mAP50–95 không tăng |
-| BATCH | 8 | Giảm 4/2 nếu hết bộ nhớ |
-| IMGSZ | 640 | Tăng có thể giúp vật nhỏ nhưng tăng VRAM/thời gian |
+| EPOCHS | 200 | Giới hạn số epoch |
+| PATIENCE | 35 | Dừng sau 35 epoch val mAP50–95 không tăng |
+| BATCH | 4 | Giảm 2 nếu hết bộ nhớ |
+| IMGSZ | 960 | Giúp vật nhỏ nhưng tăng VRAM/thời gian |
 | WORKERS | 2 | Nếu DataLoader lỗi, đặt 0 |
 
 Lần đầu nên đặt `EPOCHS = 1`, `BATCH = 2` để kiểm tra môi trường, pretrained download,
 nhãn và đầu ra. Sau khi thành công, đổi về giá trị train thật và chạy lại **cell train**:
 tên run có timestamp mới, không ghi đè. Không cần giải nén lại dataset.
 
-Script in tham số trước khi train, lưu `best.pt` theo validation mAP50–95, dừng sớm
+Script in tham số trước khi train, lưu checkpoint theo validation mAP50–95, dừng sớm
 khi không cải thiện nghiêm ngặt (điểm bằng nhau không reset patience), đánh giá lại
 best model trên val/test nếu test tồn tại. Test không chọn model.
 

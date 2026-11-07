@@ -59,31 +59,277 @@ frame gần giống. Đảm bảo có vi phạm, đủ đồ, che khuất, đôn
 Ảnh không có nhãn được xem là background và đếm trong báo cáo: kiểm tra để tránh bỏ sót nhãn.
 Các lớp không xuất hiện ở val không có đánh giá đáng tin cậy; kiểm tra `objects_per_class`.
 
-## 2. Chạy Colab
+## 2. Đưa code và dataset lên Google Colab
 
-1. Mở `train_ppe_colab.ipynb` bằng Google Colab, chọn **Runtime → Change runtime type → GPU**.
-2. Điền `REPO_URL` và `REF` trong notebook. Notebook clone toàn bộ mã từ GitHub vào `/content/ppe-project`.
-3. Upload ZIP dataset và checksum lên Google Drive theo `docs/COLAB.md`. Notebook kiểm tra checksum,
-   giải nén sang `/content/ppe_dataset` và tự sửa đường dẫn `path` trong YAML, giữ nguyên ID lớp.
-4. Chạy lần lượt các cell. Kết quả được lưu trực tiếp vào
-   `/content/drive/MyDrive/PPE/runs/<tên_run>/` để tránh mất toàn bộ khi Colab ngắt kết nối.
+Quy trình của dự án là:
 
-Script độc lập sau khi cài requirements:
-
-```bash
-python /content/ppe-project/train_ppe.py \
-  --data /content/ppe_dataset/data.yaml \
-  --model yolo26s.pt --epochs 200 --patience 35 \
-  --imgsz 960 --batch 4 --device 0 \
-  --project /content/drive/MyDrive/PPE/runs --name ppe_experiment_01
+```text
+Máy cá nhân                         GitHub                         Google Colab
+datasets/merged → ZIP + SHA256      code + notebook        →       clone code
+       │                                  │                           │
+       └──────── upload Google Drive ─────┴──────────────→           GPU train
+                                                                     │
+                                                checkpoint/log/metric → Google Drive
 ```
 
-dùng `yolo26n.pt`. Thử imgsz 960 nếu mũ quá nhỏ và GPU đủ bộ nhớ.
-Tên run phải mới để không ghi đè kết quả. Nếu hết VRAM, giảm batch xuống 2 hoặc dùng
-`yolo26n.pt`. `imgsz=960` thường tốt hơn cho mũ nhỏ nhưng chậm và tốn VRAM hơn.
-Local CPU có thể dùng `--device cpu --workers 0`, nhưng train sẽ chậm.
-`requirements.txt` cho phép nhận bản cập nhật YOLO26; mỗi run lưu `requirements.lock.txt`
-để biết chính xác phiên bản đã sử dụng. Không tự thay PyTorch/CUDA có sẵn trên Colab.
+**Không upload ảnh dataset, ZIP hoặc weights lên GitHub.** Repository chỉ chứa code,
+notebook, test, tài liệu và metadata nguồn. Dataset được đưa lên Google Drive vì kích
+thước lớn và đã được `.gitignore` loại khỏi Git.
+
+### Bước 1 — Đóng gói dataset trên máy cá nhân
+
+Chạy trên máy đang có thư mục `/home/hieupc/Documents/btlDEEP`:
+
+```bash
+cd /home/hieupc/Documents/btlDEEP
+
+# Nếu chưa có dependency dữ liệu:
+python3 -m pip install -r requirements-data.txt
+
+# Tạo ZIP từ dataset đã merge và tạo checksum đi kèm.
+python3 colab_utils.py pack \
+  --source /home/hieupc/Documents/btlDEEP/datasets/merged \
+  --archive /home/hieupc/Documents/btlDEEP/artifacts/ppe_dataset.zip
+
+# Kiểm tra checksum trước khi upload.
+sha256sum /home/hieupc/Documents/btlDEEP/artifacts/ppe_dataset.zip
+cat /home/hieupc/Documents/btlDEEP/artifacts/ppe_dataset.zip.sha256
+```
+
+Nếu máy không cài được package toàn cục, dùng dependency có sẵn của dự án:
+
+```bash
+cd /home/hieupc/Documents/btlDEEP
+PYTHONPATH=/home/hieupc/Documents/btlDEEP/.deps python3 colab_utils.py pack \
+  --source /home/hieupc/Documents/btlDEEP/datasets/merged \
+  --archive /home/hieupc/Documents/btlDEEP/artifacts/ppe_dataset.zip
+```
+
+Lệnh `pack` tạo cấu trúc ZIP trực tiếp ở gốc:
+
+```text
+data.yaml
+images/train/...
+images/val/...
+images/test/...
+labels/train/...
+labels/val/...
+labels/test/...
+merge_report.json
+provenance.json
+...
+```
+
+Nếu ZIP đã tồn tại, script không ghi đè. Hãy đổi tên archive, ví dụ
+`ppe_dataset_v2.zip`, và upload cả file checksum tương ứng.
+
+### Bước 2 — Upload dataset lên Google Drive
+
+Tạo thư mục sau trong Google Drive cá nhân:
+
+```text
+My Drive/
+└── PPE/
+    ├── datasets/
+    │   ├── ppe_dataset.zip
+    │   └── ppe_dataset.zip.sha256
+    ├── runs/
+    └── sweeps/
+```
+
+Upload **cả hai file** sau vào `My Drive/PPE/datasets/`:
+
+```text
+/home/hieupc/Documents/btlDEEP/artifacts/ppe_dataset.zip
+/home/hieupc/Documents/btlDEEP/artifacts/ppe_dataset.zip.sha256
+```
+
+Không cần bật chia sẻ công khai. Colab sẽ đọc file sau khi mount đúng tài khoản Google.
+
+### Bước 3 — Mở Colab và clone code từ GitHub
+
+Mở https://colab.research.google.com, tạo notebook mới, chọn:
+
+```text
+Runtime → Change runtime type → T4 GPU hoặc GPU đang được cấp
+```
+
+Chạy cell đầu tiên:
+
+```python
+from pathlib import Path
+import subprocess
+import sys
+
+REPO_URL = "https://github.com/phamminhhieupc/DEEPLERNING.git"
+REF = "main"  # Có thể thay bằng commit SHA để tái lập chính xác.
+REPO_DIR = Path("/content/ppe-project")
+
+if REPO_DIR.exists():
+    raise FileExistsError(
+        f"{REPO_DIR} đã tồn tại. Dùng Runtime → Restart session hoặc xóa thư mục trước khi clone lại."
+    )
+
+subprocess.run(["git", "clone", "--branch", REF, REPO_URL, str(REPO_DIR)], check=True)
+subprocess.run(["git", "-C", str(REPO_DIR), "rev-parse", "HEAD"], check=True)
+subprocess.run([
+    sys.executable, "-m", "pip", "install", "-r", str(REPO_DIR / "requirements-dev.txt")
+], check=True)
+sys.path.insert(0, str(REPO_DIR))
+```
+
+Nếu repository là private, không chèn token vào `REPO_URL`. Hãy clone bằng credential
+an toàn của bạn hoặc dùng repository public.
+
+### Bước 4 — Mount Google Drive và kiểm tra GPU
+
+```python
+from google.colab import drive
+drive.mount("/content/drive")
+```
+
+```python
+import subprocess
+import torch
+import ultralytics
+
+if not torch.cuda.is_available():
+    raise RuntimeError("Chưa có GPU. Chọn Runtime → Change runtime type → GPU rồi chạy lại.")
+
+print("GPU:", torch.cuda.get_device_name(0))
+print("PyTorch:", torch.__version__)
+print("Ultralytics:", ultralytics.__version__)
+subprocess.run(["nvidia-smi"], check=True)
+```
+
+### Bước 5 — Kiểm tra checksum và giải nén dataset
+
+```python
+from pathlib import Path
+import json
+from colab_utils import prepare_dataset
+
+DATASET_ZIP = Path("/content/drive/MyDrive/PPE/datasets/ppe_dataset.zip")
+CHECKSUM_FILE = Path("/content/drive/MyDrive/PPE/datasets/ppe_dataset.zip.sha256")
+LOCAL_DATASET = Path("/content/ppe_dataset")
+
+if not DATASET_ZIP.is_file():
+    raise FileNotFoundError(f"Không tìm thấy: {DATASET_ZIP}")
+if not CHECKSUM_FILE.is_file():
+    raise FileNotFoundError(f"Không tìm thấy: {CHECKSUM_FILE}")
+
+expected_sha256 = CHECKSUM_FILE.read_text(encoding="utf-8").split()[0]
+prepared = prepare_dataset(DATASET_ZIP, LOCAL_DATASET, expected_sha256)
+DATA_YAML = Path(prepared["data"])
+print(json.dumps(prepared, indent=2, ensure_ascii=False))
+```
+
+Sau cell này, dataset phải có:
+
+```text
+/content/ppe_dataset/data.yaml
+/content/ppe_dataset/images/train/
+/content/ppe_dataset/images/val/
+/content/ppe_dataset/labels/train/
+/content/ppe_dataset/labels/val/
+```
+
+Nếu `/content/ppe_dataset` đã tồn tại, không chạy lại cell giải nén. Hãy dùng runtime
+mới hoặc đổi `LOCAL_DATASET` sang thư mục mới sau khi kiểm tra dữ liệu cũ.
+
+### Bước 6 — Chạy smoke test trước
+
+Smoke test giúp kiểm tra model download, GPU, YAML, label và quyền ghi Drive trước khi
+chạy nhiều giờ:
+
+```bash
+%cd /content/ppe-project
+!python train_ppe.py \
+  --data /content/ppe_dataset/data.yaml \
+  --model yolo26n.pt \
+  --epochs 1 --patience 1 \
+  --imgsz 640 --batch 2 --workers 0 --device 0 \
+  --project /content/drive/MyDrive/PPE/runs \
+  --name smoke_01
+```
+
+Smoke test thành công khi run có `summary.json` hoặc có `failure.json` chứa lỗi rõ ràng.
+Kiểm tra log tại:
+
+```text
+/content/drive/MyDrive/PPE/runs/smoke_01/
+```
+
+### Bước 7 — Train một model
+
+Sau khi smoke test thành công, chạy model đơn lẻ:
+
+```bash
+%cd /content/ppe-project
+!python train_ppe.py \
+  --data /content/ppe_dataset/data.yaml \
+  --model yolo26s.pt \
+  --epochs 200 --patience 35 \
+  --imgsz 960 --batch 4 --workers 2 --device 0 \
+  --project /content/drive/MyDrive/PPE/runs \
+  --name ppe_yolo26s_960_v1
+```
+
+Nếu bị hết VRAM, dùng `--batch 2`, `--imgsz 640` hoặc đổi model thành `yolo26n.pt`.
+Tên run phải khác mỗi lần chạy; script không ghi đè run cũ.
+
+### Bước 8 — Chạy sweep để chọn model tốt nhất
+
+Để so sánh YOLO26n/YOLO26s và kích thước ảnh 640/960:
+
+```bash
+%cd /content/ppe-project
+!python train_sweep.py \
+  --data /content/ppe_dataset/data.yaml \
+  --models yolo26n.pt,yolo26s.pt \
+  --imgszs 640,960 \
+  --epochs 200 --patience 35 \
+  --batch 4 --workers 2 --device 0 \
+  --project /content/drive/MyDrive/PPE/sweeps
+```
+
+Sweep chạy tuần tự từng candidate và chọn theo `metrics/mAP50-95(B)` trên validation.
+Test chỉ được đánh giá sau khi chọn xong. Model champion nằm ở:
+
+```text
+/content/drive/MyDrive/PPE/sweeps/sweep_<timestamp>/champion/weights/best.pt
+```
+
+Thông tin chọn model nằm ở:
+
+```text
+/content/drive/MyDrive/PPE/sweeps/sweep_<timestamp>/champion/selection.json
+```
+
+Nếu GPU yếu, bắt đầu bằng:
+
+```bash
+!python train_sweep.py \
+  --data /content/ppe_dataset/data.yaml \
+  --models yolo26n.pt --imgszs 640 \
+  --epochs 100 --patience 20 --batch 2 --workers 0 --device 0 \
+  --project /content/drive/MyDrive/PPE/sweeps
+```
+
+### Bước 9 — Tải model về máy
+
+Sau khi train xong, tải checkpoint champion hoặc copy sang thư mục Drive khác:
+
+```python
+from google.colab import files
+
+CHAMPION = "/content/drive/MyDrive/PPE/sweeps/sweep_<timestamp>/champion/weights/best.pt"
+files.download(CHAMPION)
+```
+
+File lớn có thể tải chậm; nên giữ bản gốc trong Google Drive. Đồng thời lưu cùng
+`selection.json`, `summary.json`, `metrics_val.json`, `metrics_test.json` và
+`environment.json` để biết model được train bằng dataset/cấu hình nào.
 
 ### Chọn model tốt nhất bằng validation
 
