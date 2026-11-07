@@ -248,8 +248,8 @@ chạy nhiều giờ:
   --data /content/ppe_dataset/data.yaml \
   --model yolo26n.pt \
   --epochs 1 --patience 1 \
-  --imgsz 640 --batch 2 --workers 0 --device 0 \
-  --project /content/drive/MyDrive/PPE/runs \
+  --imgsz 640 --batch 2 --workers 0 --cache False --device 0 \
+  --project /content/runs_fast \
   --name smoke_01
 ```
 
@@ -257,12 +257,39 @@ Smoke test thành công khi run có `summary.json` hoặc có `failure.json` ch�
 Kiểm tra log tại:
 
 ```text
-/content/drive/MyDrive/PPE/runs/smoke_01/
+/content/runs_fast/smoke_01/
 ```
 
-### Bước 7 — Train một model
+### Bước 7 — Screening nhanh để kiểm tra cấu hình
 
-Sau khi smoke test thành công, chạy model đơn lẻ:
+Sau khi smoke test thành công, chạy profile nhanh. Profile này ưu tiên tốc độ mỗi
+epoch để kiểm tra dataset/model, chưa phải kết quả cuối:
+
+```bash
+%cd /content/ppe-project
+!python train_ppe.py \
+  --data /content/ppe_dataset/data.yaml \
+  --model yolo26n.pt \
+  --epochs 80 --patience 15 \
+  --imgsz 640 --batch 8 --workers 4 --cache ram \
+  --save-period 5 --device 0 \
+  --project /content/runs_fast \
+  --name ppe_yolo26n_640_screening
+```
+
+Nếu `batch=8` hết VRAM, giảm xuống 4 hoặc 2. Kết quả tạm được giữ ở `/content`
+để giảm thời gian ghi Google Drive. Sau khi chạy xong, copy lên Drive:
+
+```bash
+!cp -r /content/runs_fast/ppe_yolo26n_640_screening \
+  /content/drive/MyDrive/PPE/runs/
+```
+
+Tên run phải khác mỗi lần chạy; script không ghi đè run cũ.
+
+### Bước 8 — Train model cuối cùng
+
+Sau khi cấu hình screening ổn định, train model chất lượng cao hơn:
 
 ```bash
 %cd /content/ppe-project
@@ -270,15 +297,19 @@ Sau khi smoke test thành công, chạy model đơn lẻ:
   --data /content/ppe_dataset/data.yaml \
   --model yolo26s.pt \
   --epochs 200 --patience 35 \
-  --imgsz 960 --batch 4 --workers 4 --cache ram --device 0 \
+  --imgsz 960 --batch 4 --workers 4 --cache ram \
+  --save-period 1 --device 0 \
   --project /content/drive/MyDrive/PPE/runs \
-  --name ppe_yolo26s_960_v1
+  --name ppe_yolo26s_960_final
 ```
 
-Nếu bị hết VRAM, dùng `--batch 2`, `--imgsz 640` hoặc đổi model thành `yolo26n.pt`.
-Tên run phải khác mỗi lần chạy; script không ghi đè run cũ.
+Nếu ưu tiên tốc độ ghi file hơn việc giữ checkpoint trực tiếp trên Drive, có thể đổi
+`--project` thành `/content/runs_final`, rồi copy toàn bộ run sang Drive sau khi train.
 
-### Profile GPU T4 và log loss từng epoch
+Nếu bị OOM, giảm theo thứ tự: `batch 4 → 2`, đổi `yolo26s → yolo26n`, rồi mới giảm
+`imgsz 960 → 640`.
+
+### Profile GPU T4, tăng tốc epoch và log loss
 
 T4 là một GPU; không truyền nhiều ID vào `--device`. Tăng tốc chủ yếu bằng AMP,
 DataLoader workers và cache ảnh trong RAM. Profile mặc định phù hợp để bắt đầu:
@@ -289,6 +320,17 @@ device=0, amp=true, workers=4, cache=ram, batch=4, imgsz=960
 
 Nếu RAM Colab không đủ, đổi `--cache ram` thành `--cache disk` hoặc `--cache False`.
 Nếu hết VRAM, giảm `batch` xuống 2 trước khi giảm `imgsz`.
+
+Không train trực tiếp từ thư mục Google Drive dataset. Dataset phải được giải nén vào
+`/content/ppe_dataset`; chỉ lưu checkpoint/log lên Drive sau đó. Theo dõi GPU bằng:
+
+```bash
+!nvidia-smi
+!nvidia-smi dmon -s pucm
+```
+
+Nếu GPU utilization thấp, thử tăng `batch` hoặc `workers`. Nếu GPU gần 100% nhưng
+epoch vẫn chậm, giảm `imgsz` hoặc dùng `yolo26n.pt`.
 
 Mỗi epoch ghi đầy đủ vào:
 
@@ -301,7 +343,7 @@ Các trường chính gồm `train_box_loss`, `train_cls_loss`, `train_dfl_loss`
 `val_box_loss`, `val_cls_loss`, `val_dfl_loss`, `precision`, `recall`, `mAP50`,
 `mAP50_95` và learning rate. Màn hình console cũng in các trường có sẵn sau mỗi epoch.
 
-### Bước 8 — Chạy sweep để chọn model tốt nhất
+### Bước 9 — Chạy sweep để chọn model tốt nhất
 
 Để so sánh YOLO26n/YOLO26s và kích thước ảnh 640/960:
 
@@ -339,7 +381,7 @@ Nếu GPU yếu, bắt đầu bằng:
   --project /content/drive/MyDrive/PPE/sweeps
 ```
 
-### Bước 9 — Tải model về máy
+### Bước 10 — Tải model về máy
 
 Sau khi train xong, tải checkpoint champion hoặc copy sang thư mục Drive khác:
 

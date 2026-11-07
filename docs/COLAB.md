@@ -132,16 +132,54 @@ và các cell tiếp theo; không chèn token vào `REPO_URL` hoặc lưu nó tr
 
 | Biến notebook | Mặc định | Ý nghĩa |
 |---|---|---|
-| MODEL | yolo26s.pt | Pretrained; dùng yolo26n.pt khi GPU ít VRAM |
-| EPOCHS | 200 | Giới hạn số epoch |
-| PATIENCE | 35 | Dừng sau 35 epoch val mAP50–95 không tăng |
-| BATCH | 4 | Giảm 2 nếu hết bộ nhớ |
-| IMGSZ | 960 | Giúp vật nhỏ nhưng tăng VRAM/thời gian |
+| MODEL | yolo26s.pt | Pretrained; `yolo26n.pt` cho screening nhanh |
+| EPOCHS | 200 | Train cuối; screening dùng 80 |
+| PATIENCE | 35 | Train cuối; screening dùng 15 |
+| BATCH | 4 | Train cuối; screening T4 có thể dùng 8, giảm khi OOM |
+| IMGSZ | 960 | Train cuối; screening dùng 640 để nhanh hơn |
 | WORKERS | 4 | Tăng tốc cấp dữ liệu cho T4; nếu DataLoader lỗi, đặt 0 |
 | CACHE | ram | Cache ảnh trong RAM; đổi `disk`/`False` nếu thiếu RAM |
-
+Lần đầu nên đặt `EPOCHS = 1`, `BATCH = 2`, `CACHE = "False"` để kiểm tra môi trường, pretrained download,
 Lần đầu nên đặt `EPOCHS = 1`, `BATCH = 2`, `CACHE = "False"` để kiểm tra môi trường, pretrained download,
 nhãn và đầu ra. Sau khi thành công, đổi về giá trị train thật và chạy lại **cell train**:
+
+### Profile screening nhanh và train cuối
+
+Để giảm thời gian mỗi epoch trên T4, dataset phải được giải nén ở `/content/ppe_dataset`,
+không đọc ảnh trực tiếp từ Google Drive. Screening nhanh ghi kết quả tạm vào `/content`:
+
+```bash
+%cd /content/ppe-project
+!python train_ppe.py \
+  --data /content/ppe_dataset/data.yaml \
+  --model yolo26n.pt --epochs 80 --patience 15 \
+  --imgsz 640 --batch 8 --workers 4 --cache ram \
+  --save-period 5 --device 0 \
+  --project /content/runs_fast --name ppe_yolo26n_640_screening
+```
+
+Copy kết quả screening lên Drive sau khi hoàn tất:
+
+```bash
+!cp -r /content/runs_fast/ppe_yolo26n_640_screening \
+  /content/drive/MyDrive/PPE/runs/
+```
+
+Train cuối dùng model lớn hơn và ảnh lớn hơn:
+
+```bash
+%cd /content/ppe-project
+!python train_ppe.py \
+  --data /content/ppe_dataset/data.yaml \
+  --model yolo26s.pt --epochs 200 --patience 35 \
+  --imgsz 960 --batch 4 --workers 4 --cache ram \
+  --save-period 1 --device 0 \
+  --project /content/drive/MyDrive/PPE/runs --name ppe_yolo26s_960_final
+```
+
+Nếu bị OOM, giảm `batch` 4 → 2, đổi `yolo26s` thành `yolo26n`, rồi mới giảm `imgsz`.
+Nếu RAM không đủ, dùng `--cache disk`; nếu disk cache cũng không phù hợp, dùng
+`--cache False`. Theo dõi T4 bằng `!nvidia-smi` và `!nvidia-smi dmon -s pucm`.
 tên run có timestamp mới, không ghi đè. Không cần giải nén lại dataset.
 
 Script in tham số trước khi train, dùng AMP trên GPU, workers=4 và cache RAM để tận dụng T4,
