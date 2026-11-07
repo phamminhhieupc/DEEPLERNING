@@ -137,13 +137,15 @@ và các cell tiếp theo; không chèn token vào `REPO_URL` hoặc lưu nó tr
 | PATIENCE | 35 | Dừng sau 35 epoch val mAP50–95 không tăng |
 | BATCH | 4 | Giảm 2 nếu hết bộ nhớ |
 | IMGSZ | 960 | Giúp vật nhỏ nhưng tăng VRAM/thời gian |
-| WORKERS | 2 | Nếu DataLoader lỗi, đặt 0 |
+| WORKERS | 4 | Tăng tốc cấp dữ liệu cho T4; nếu DataLoader lỗi, đặt 0 |
+| CACHE | ram | Cache ảnh trong RAM; đổi `disk`/`False` nếu thiếu RAM |
 
-Lần đầu nên đặt `EPOCHS = 1`, `BATCH = 2` để kiểm tra môi trường, pretrained download,
+Lần đầu nên đặt `EPOCHS = 1`, `BATCH = 2`, `CACHE = "False"` để kiểm tra môi trường, pretrained download,
 nhãn và đầu ra. Sau khi thành công, đổi về giá trị train thật và chạy lại **cell train**:
 tên run có timestamp mới, không ghi đè. Không cần giải nén lại dataset.
 
-Script in tham số trước khi train, lưu checkpoint theo validation mAP50–95, dừng sớm
+Script in tham số trước khi train, dùng AMP trên GPU, workers=4 và cache RAM để tận dụng T4,
+đồng thời lưu checkpoint theo validation mAP50–95, dừng sớm
 khi không cải thiện nghiêm ngặt (điểm bằng nhau không reset patience), đánh giá lại
 best model trên val/test nếu test tồn tại. Test không chọn model.
 
@@ -161,6 +163,8 @@ Không tự cài lại PyTorch/CUDA trong notebook; tận dụng bản có sẵn
     weights/last.pt
     weights/epoch*.pt
     results.csv
+    epoch_metrics.jsonl
+    epoch_metrics.csv
     results.png
     args.yaml
     requested_config.json

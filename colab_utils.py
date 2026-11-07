@@ -72,8 +72,8 @@ def prepare_dataset(archive, destination, expected_sha256=None):
     return dict(data=str(config_path), report=report)
 
 
-def run_training(repo, data, project, name, model="yolo26s.pt", epochs=150,
-                 patience=25, batch=8, imgsz=640, workers=2, device="0"):
+def run_training(repo, data, project, name, model="yolo26s.pt", epochs=200,
+                 patience=35, batch=4, imgsz=960, workers=4, device="0", cache="ram"):
     repo, project = Path(repo).resolve(), Path(project).resolve()
     if Path(name).name != name or name in ("", ".", ".."):
         raise ValueError("Run name must be one directory name")
@@ -83,7 +83,8 @@ def run_training(repo, data, project, name, model="yolo26s.pt", epochs=150,
     command = [sys.executable, "-u", str(repo / "train_ppe.py"), "--data", str(Path(data).resolve()),
                "--project", str(project), "--name", name, "--model", model,
                "--epochs", str(epochs), "--patience", str(patience), "--batch", str(batch),
-               "--imgsz", str(imgsz), "--workers", str(workers), "--device", device]
+               "--imgsz", str(imgsz), "--workers", str(workers), "--device", device,
+               "--cache", cache]
     with (project / f"console_{name}.log").open("x") as log:
         process = subprocess.Popen(command, cwd=repo, stdout=subprocess.PIPE,
                                    stderr=subprocess.STDOUT, text=True, bufsize=1)

@@ -6,7 +6,14 @@ from pathlib import Path
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from train_ppe import PlateauMonitor, select_checkpoint_by_validation, validate_dataset, write_json
+from train_ppe import (
+    PlateauMonitor,
+    append_epoch_record,
+    build_epoch_record,
+    select_checkpoint_by_validation,
+    validate_dataset,
+    write_json,
+)
 
 
 class MonitorTests(unittest.TestCase):
@@ -69,6 +76,33 @@ class MonitorTests(unittest.TestCase):
             selected, details = select_checkpoint_by_validation(run)
             self.assertEqual(selected, native)
             self.assertEqual(details["source"], "ultralytics_best_fallback")
+
+    def test_epoch_record_preserves_losses_and_metrics(self):
+        class TensorLike:
+            def __init__(self, value):
+                self.value = value
+
+            def item(self):
+                return self.value
+
+        class Trainer:
+            tloss = {"box_loss": TensorLike(1.25), "cls_loss": TensorLike(0.5), "dfl_loss": 0.25}
+            metrics = {"metrics/mAP50-95(B)": 0.75, "metrics/precision(B)": 0.8}
+            lr = {"lr/pg0": 0.001}
+
+        record = build_epoch_record(Trainer(), 3)
+        self.assertEqual(record["epoch"], 3)
+        self.assertEqual(record["train_box_loss"], 1.25)
+        self.assertEqual(record["train_cls_loss"], 0.5)
+        self.assertEqual(record["mAP50_95"], 0.75)
+
+    def test_epoch_record_writes_jsonl_and_csv(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "epoch_metrics.jsonl"
+            append_epoch_record(path, {"epoch": 1, "train_box_loss": 1.0, "mAP50_95": 0.5})
+            self.assertIn('"epoch": 1', path.read_text())
+            csv_path = path.with_suffix(".csv")
+            self.assertIn("epoch,train_box_loss", csv_path.read_text())
 
 
 @unittest.skipUnless(importlib.util.find_spec("yaml"), "Install requirements.txt for dataset tests")

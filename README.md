@@ -270,13 +270,36 @@ Sau khi smoke test thành công, chạy model đơn lẻ:
   --data /content/ppe_dataset/data.yaml \
   --model yolo26s.pt \
   --epochs 200 --patience 35 \
-  --imgsz 960 --batch 4 --workers 2 --device 0 \
+  --imgsz 960 --batch 4 --workers 4 --cache ram --device 0 \
   --project /content/drive/MyDrive/PPE/runs \
   --name ppe_yolo26s_960_v1
 ```
 
 Nếu bị hết VRAM, dùng `--batch 2`, `--imgsz 640` hoặc đổi model thành `yolo26n.pt`.
 Tên run phải khác mỗi lần chạy; script không ghi đè run cũ.
+
+### Profile GPU T4 và log loss từng epoch
+
+T4 là một GPU; không truyền nhiều ID vào `--device`. Tăng tốc chủ yếu bằng AMP,
+DataLoader workers và cache ảnh trong RAM. Profile mặc định phù hợp để bắt đầu:
+
+```text
+device=0, amp=true, workers=4, cache=ram, batch=4, imgsz=960
+```
+
+Nếu RAM Colab không đủ, đổi `--cache ram` thành `--cache disk` hoặc `--cache False`.
+Nếu hết VRAM, giảm `batch` xuống 2 trước khi giảm `imgsz`.
+
+Mỗi epoch ghi đầy đủ vào:
+
+```text
+epoch_metrics.jsonl   # dữ liệu loss/metric đầy đủ, không làm tròn
+epoch_metrics.csv     # dễ mở bằng pandas/Excel
+```
+
+Các trường chính gồm `train_box_loss`, `train_cls_loss`, `train_dfl_loss`,
+`val_box_loss`, `val_cls_loss`, `val_dfl_loss`, `precision`, `recall`, `mAP50`,
+`mAP50_95` và learning rate. Màn hình console cũng in các trường có sẵn sau mỗi epoch.
 
 ### Bước 8 — Chạy sweep để chọn model tốt nhất
 
@@ -289,7 +312,7 @@ Tên run phải khác mỗi lần chạy; script không ghi đè run cũ.
   --models yolo26n.pt,yolo26s.pt \
   --imgszs 640,960 \
   --epochs 200 --patience 35 \
-  --batch 4 --workers 2 --device 0 \
+  --batch 4 --workers 4 --cache ram --device 0 \
   --project /content/drive/MyDrive/PPE/sweeps
 ```
 

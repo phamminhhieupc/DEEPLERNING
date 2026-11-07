@@ -29,7 +29,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--epochs", type=int, default=200)
     parser.add_argument("--patience", type=int, default=35)
     parser.add_argument("--batch", type=int, default=4)
-    parser.add_argument("--workers", type=int, default=2)
+    parser.add_argument("--workers", type=int, default=4)
     parser.add_argument("--device", default="0")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--optimizer", default="AdamW")
@@ -39,7 +39,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--warmup-epochs", type=float, default=3.0)
     parser.add_argument("--close-mosaic", type=int, default=15)
     parser.add_argument("--save-period", type=int, default=1)
-    parser.add_argument("--cache", default="False", choices=["ram", "disk", "False"])
+    parser.add_argument("--cache", default="ram", choices=["ram", "disk", "False"])
     parser.add_argument("--no-amp", action="store_true")
     parser.add_argument("--require-all-classes-in-val", action="store_true")
     return parser

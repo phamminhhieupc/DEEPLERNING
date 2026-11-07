@@ -170,6 +170,88 @@ def _metric_value(metrics: dict[str, Any], key: str) -> float | None:
     return value
 
 
+def _float_value(value: Any) -> float | None:
+    """Convert a scalar/tensor-like value to a finite float."""
+    try:
+        if hasattr(value, "detach"):
+            value = value.detach().cpu()
+        if hasattr(value, "item"):
+            value = value.item()
+        value = float(value)
+    except (TypeError, ValueError):
+        return None
+    return value if math.isfinite(value) else None
+
+
+def _numeric_values(values: Any) -> dict[str, float]:
+    if not hasattr(values, "items"):
+        return {}
+    return {
+        str(key): number
+        for key, value in values.items()
+        if (number := _float_value(value)) is not None
+    }
+
+
+def build_epoch_record(trainer: Any, epoch: int) -> dict[str, Any]:
+    """Build an auditable per-epoch train/validation/lr record.
+
+    ``trainer.tloss`` is the epoch-average training loss.  Validation losses and
+    detection metrics are taken from ``trainer.metrics`` when the installed
+    Ultralytics version exposes them.  Raw mappings are retained so no precision
+    is lost even when a particular version uses different metric names.
+    """
+    train_losses = _numeric_values(getattr(trainer, "tloss", {}))
+    validation = _numeric_values(getattr(trainer, "metrics", {}))
+    learning_rates = _numeric_values(getattr(trainer, "lr", {}))
+    record: dict[str, Any] = {
+        "epoch": epoch,
+        "train_loss": train_losses,
+        "validation": validation,
+        "learning_rate": learning_rates,
+    }
+    aliases = {
+        "train_box_loss": ("train/box_loss", "box_loss"),
+        "train_cls_loss": ("train/cls_loss", "cls_loss"),
+        "train_dfl_loss": ("train/dfl_loss", "dfl_loss"),
+        "val_box_loss": ("val/box_loss", "validation/box_loss"),
+        "val_cls_loss": ("val/cls_loss", "validation/cls_loss"),
+        "val_dfl_loss": ("val/dfl_loss", "validation/dfl_loss"),
+        "precision": ("metrics/precision(B)", "metrics/precision"),
+        "recall": ("metrics/recall(B)", "metrics/recall"),
+        "mAP50": ("metrics/mAP50(B)", "metrics/mAP50"),
+        "mAP50_95": ("metrics/mAP50-95(B)", "metrics/mAP50-95"),
+    }
+    for output, keys in aliases.items():
+        for key in keys:
+            value = train_losses.get(key) or validation.get(key)
+            if value is not None:
+                record[output] = value
+                break
+    return record
+
+
+def append_epoch_record(path: str | Path, record: dict[str, Any]) -> None:
+    """Append one full-precision JSONL and CSV epoch record for easy inspection."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(record, ensure_ascii=False, allow_nan=False) + "\n")
+        handle.flush()
+    columns = [
+        "epoch", "train_box_loss", "train_cls_loss", "train_dfl_loss",
+        "val_box_loss", "val_cls_loss", "val_dfl_loss", "precision", "recall",
+        "mAP50", "mAP50_95",
+    ]
+    csv_path = path.with_suffix(".csv")
+    with csv_path.open("a", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=columns, extrasaction="ignore")
+        if handle.tell() == 0:
+            writer.writeheader()
+        writer.writerow({key: record.get(key, "") for key in columns})
+        handle.flush()
+
+
 def _result_metrics(result: Any) -> dict[str, float]:
     return {str(key): float(value) for key, value in result.results_dict.items()}
 
@@ -323,18 +405,29 @@ def train_one(args: argparse.Namespace) -> Path:
         write_json(run_dir / "quality_warnings.json", {"classes_missing_from_val": missing_val})
 
     monitor = PlateauMonitor(args.patience)
+    epoch_log = run_dir / "epoch_metrics.jsonl"
 
     def record_epoch(trainer: Any) -> None:
-        score = _metric_value(getattr(trainer, "metrics", {}) or {}, PRIMARY_METRIC)
-        if score is None:
-            return
         epoch = int(getattr(trainer, "epoch", monitor.last_epoch - 1)) + 1
         if epoch <= monitor.last_epoch:
             return
+        record = build_epoch_record(trainer, epoch)
+        append_epoch_record(epoch_log, record)
+        score = _metric_value(getattr(trainer, "metrics", {}) or {}, PRIMARY_METRIC)
+        if score is None:
+            print(f"[PPE] epoch={epoch} loss/metrics logged; {PRIMARY_METRIC} unavailable", flush=True)
+            return
         should_stop = monitor.update(epoch, score)
         write_json(run_dir / "early_stopping.json", monitor.state())
-        print(f"[PPE] epoch={epoch} val_mAP50-95={score:.6f} best={monitor.best:.6f} "
-              f"no_improvement={monitor.bad_epochs}/{monitor.patience}", flush=True)
+        fields = " ".join(
+            f"{key}={record[key]:.6f}"
+            for key in ("train_box_loss", "train_cls_loss", "train_dfl_loss",
+                        "val_box_loss", "val_cls_loss", "val_dfl_loss",
+                        "precision", "recall", "mAP50", "mAP50_95")
+            if key in record
+        )
+        print(f"[PPE] epoch={epoch} {fields} val_mAP50-95={score:.6f} "
+              f"best={monitor.best:.6f} no_improvement={monitor.bad_epochs}/{monitor.patience}", flush=True)
         if should_stop:
             trainer.stop = True
             print("[PPE] Early stopping: validation mAP did not improve.", flush=True)
@@ -382,8 +475,10 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--epochs", type=int, default=200)
     parser.add_argument("--patience", type=int, default=35)
     parser.add_argument("--imgsz", type=int, default=960)
-    parser.add_argument("--batch", type=int, default=4)
-    parser.add_argument("--workers", type=int, default=2)
+    parser.add_argument("--batch", type=int, default=4,
+                        help="Batch size; use -1 for Ultralytics auto-batch")
+    parser.add_argument("--workers", type=int, default=4,
+                        help="DataLoader workers; 4 is a good Colab T4 starting point")
     parser.add_argument("--device", default="0")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--project", default="/content/drive/MyDrive/PPE/runs")
@@ -395,7 +490,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--warmup-epochs", type=float, default=3.0)
     parser.add_argument("--close-mosaic", type=int, default=15)
     parser.add_argument("--save-period", type=int, default=1)
-    parser.add_argument("--cache", default=False, choices=["ram", "disk", "False"])
+    parser.add_argument("--cache", default="ram", choices=["ram", "disk", "False"],
+                        help="ram speeds repeated epochs but uses system RAM")
     parser.add_argument("--no-amp", action="store_true")
     parser.add_argument("--require-all-classes-in-val", action="store_true")
     parser.add_argument("--skip-test", action="store_true", help="Do not evaluate test after this run")
@@ -407,8 +503,8 @@ def main() -> None:
     args = parser.parse_args()
     if args.cache == "False":
         args.cache = False
-    if args.epochs < 1 or args.patience < 1 or args.imgsz < 32 or args.batch < 1 or args.workers < 0:
-        parser.error("epochs/patience/imgsz/batch must be positive and workers must be non-negative")
+    if args.epochs < 1 or args.patience < 1 or args.imgsz < 32 or args.batch < -1 or args.workers < 0:
+        parser.error("epochs/patience/imgsz must be positive, batch must be >= -1, workers must be non-negative")
     if Path(args.name).name != args.name or args.name in ("", ".", ".."):
         parser.error("name must be one directory name")
     train_one(args)
