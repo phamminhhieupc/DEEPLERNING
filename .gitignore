@@ -1,0 +1,15 @@
+.deps/
+.venv/
+__pycache__/
+datasets/raw/
+datasets/merged/
+datasets/merged_verified/
+datasets/merged_initial/
+datasets/downloads/
+*.pt
+artifacts/
+*.zip
+*.zip.sha256
+.ipynb_checkpoints/
+runs/
+.env

@@ -1,0 +1,11 @@
+# Copy to data.yaml and change path/names to match YOUR existing labels.
+path: /content/ppe_dataset
+train: images/train
+val: images/val
+# test: images/test
+names:
+  0: person
+  1: helmet
+  2: vest
+  3: no_helmet
+  4: no_vest
