@@ -28,7 +28,7 @@ Tại máy đang có bộ dữ liệu, chạy:
 python3 -m pip install -r /home/hieupc/Documents/btlDEEP/requirements-data.txt
 python3 /home/hieupc/Documents/btlDEEP/colab_utils.py pack \
   --source /home/hieupc/Documents/btlDEEP/datasets/merged \
-  --archive /home/hieupc/Documents/btlDEEP/artifacts/ppe_dataset.zip
+  --archive /home/hieupc/Documents/btlDEEP/artifacts/ppe_dataset_v2.zip
 ```
 
 Nếu hệ thống chặn pip toàn cục, dùng virtualenv. Tại môi trường hiện tại đã có dependency
@@ -38,10 +38,10 @@ trong `.deps`, có thể thay dòng cài pip bằng:
 PYTHONPATH=/home/hieupc/Documents/btlDEEP/.deps python3 \
   /home/hieupc/Documents/btlDEEP/colab_utils.py pack \
   --source /home/hieupc/Documents/btlDEEP/datasets/merged \
-  --archive /home/hieupc/Documents/btlDEEP/artifacts/ppe_dataset.zip
+  --archive /home/hieupc/Documents/btlDEEP/artifacts/ppe_dataset_v2.zip
 ```
 
-Lệnh tạo ZIP và file `ppe_dataset.zip.sha256`. ZIP có cấu trúc trực tiếp ở gốc:
+Lệnh tạo ZIP và file `ppe_dataset_v2.zip.sha256`. ZIP có cấu trúc trực tiếp ở gốc:
 
 Trong lần chuẩn bị hiện tại, hai tệp đã được tạo sẵn tại
 `/home/hieupc/Documents/btlDEEP/artifacts/` (ZIP khoảng 130 MiB).
@@ -63,8 +63,8 @@ và nhãn không thay đổi. Script không ghi đè ZIP đã tồn tại; đổ
 Upload **cả hai tệp** lên Drive:
 
 ```text
-MyDrive/PPE/datasets/ppe_dataset.zip
-MyDrive/PPE/datasets/ppe_dataset.zip.sha256
+MyDrive/PPE/datasets/ppe_dataset_v2.zip
+MyDrive/PPE/datasets/ppe_dataset_v2.zip.sha256
 ```
 
 Không cần chia sẻ Drive công khai: Colab mount Drive cá nhân qua tài khoản của bạn.
@@ -211,7 +211,7 @@ nhưng đây không tương đương resume: optimizer, scheduler và patience b
 python /content/ppe-project/train_sweep.py \
   --data /content/ppe_dataset/data.yaml \
   --models yolo26n.pt,yolo26s.pt --imgszs 640,960 \
-  --epochs 200 --patience 35 --batch 4 --device 0 \
+  --epochs 200 --patience 35 --batch 4 --workers 4 --cache ram --device 0 \
   --project /content/drive/MyDrive/PPE/sweeps
 ```
 

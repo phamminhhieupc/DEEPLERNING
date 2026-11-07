@@ -89,11 +89,11 @@ python3 -m pip install -r requirements-data.txt
 # Tạo ZIP từ dataset đã merge và tạo checksum đi kèm.
 python3 colab_utils.py pack \
   --source /home/hieupc/Documents/btlDEEP/datasets/merged \
-  --archive /home/hieupc/Documents/btlDEEP/artifacts/ppe_dataset.zip
+  --archive /home/hieupc/Documents/btlDEEP/artifacts/ppe_dataset_v2.zip
 
 # Kiểm tra checksum trước khi upload.
-sha256sum /home/hieupc/Documents/btlDEEP/artifacts/ppe_dataset.zip
-cat /home/hieupc/Documents/btlDEEP/artifacts/ppe_dataset.zip.sha256
+sha256sum /home/hieupc/Documents/btlDEEP/artifacts/ppe_dataset_v2.zip
+cat /home/hieupc/Documents/btlDEEP/artifacts/ppe_dataset_v2.zip.sha256
 ```
 
 Nếu máy không cài được package toàn cục, dùng dependency có sẵn của dự án:
@@ -102,7 +102,7 @@ Nếu máy không cài được package toàn cục, dùng dependency có sẵn 
 cd /home/hieupc/Documents/btlDEEP
 PYTHONPATH=/home/hieupc/Documents/btlDEEP/.deps python3 colab_utils.py pack \
   --source /home/hieupc/Documents/btlDEEP/datasets/merged \
-  --archive /home/hieupc/Documents/btlDEEP/artifacts/ppe_dataset.zip
+  --archive /home/hieupc/Documents/btlDEEP/artifacts/ppe_dataset_v2.zip
 ```
 
 Lệnh `pack` tạo cấu trúc ZIP trực tiếp ở gốc:
@@ -131,8 +131,8 @@ Tạo thư mục sau trong Google Drive cá nhân:
 My Drive/
 └── PPE/
     ├── datasets/
-    │   ├── ppe_dataset.zip
-    │   └── ppe_dataset.zip.sha256
+    │   ├── ppe_dataset_v2.zip
+    │   └── ppe_dataset_v2.zip.sha256
     ├── runs/
     └── sweeps/
 ```
@@ -140,8 +140,8 @@ My Drive/
 Upload **cả hai file** sau vào `My Drive/PPE/datasets/`:
 
 ```text
-/home/hieupc/Documents/btlDEEP/artifacts/ppe_dataset.zip
-/home/hieupc/Documents/btlDEEP/artifacts/ppe_dataset.zip.sha256
+/home/hieupc/Documents/btlDEEP/artifacts/ppe_dataset_v2.zip
+/home/hieupc/Documents/btlDEEP/artifacts/ppe_dataset_v2.zip.sha256
 ```
 
 Không cần bật chia sẻ công khai. Colab sẽ đọc file sau khi mount đúng tài khoản Google.
@@ -209,8 +209,8 @@ from pathlib import Path
 import json
 from colab_utils import prepare_dataset
 
-DATASET_ZIP = Path("/content/drive/MyDrive/PPE/datasets/ppe_dataset.zip")
-CHECKSUM_FILE = Path("/content/drive/MyDrive/PPE/datasets/ppe_dataset.zip.sha256")
+DATASET_ZIP = Path("/content/drive/MyDrive/PPE/datasets/ppe_dataset_v2.zip")
+CHECKSUM_FILE = Path("/content/drive/MyDrive/PPE/datasets/ppe_dataset_v2.zip.sha256")
 LOCAL_DATASET = Path("/content/ppe_dataset")
 
 if not DATASET_ZIP.is_file():
@@ -353,24 +353,6 @@ files.download(CHAMPION)
 File lớn có thể tải chậm; nên giữ bản gốc trong Google Drive. Đồng thời lưu cùng
 `selection.json`, `summary.json`, `metrics_val.json`, `metrics_test.json` và
 `environment.json` để biết model được train bằng dataset/cấu hình nào.
-
-### Chọn model tốt nhất bằng validation
-
-Không chọn model bằng test. Để so sánh YOLO26n/YOLO26s và nhiều kích thước ảnh, chạy
-sweep trên GPU Colab:
-
-```bash
-python /content/ppe-project/train_sweep.py \
-  --data /content/ppe_dataset/data.yaml \
-  --models yolo26n.pt,yolo26s.pt --imgszs 640,960 \
-  --epochs 200 --patience 35 --batch 4 --device 0 \
-  --project /content/drive/MyDrive/PPE/sweeps
-```
-
-Sweep chạy tuần tự từng candidate, chọn `champion/weights/best.pt` theo
-`metrics/mAP50-95(B)` trên **validation**. Chỉ sau khi chọn xong, champion mới được
-đánh giá trên test và kết quả nằm trong `champion/selection.json`. Nếu dữ liệu đủ
-VRAM, có thể thêm `--imgszs 1280`; không tăng kích thước chỉ vì metric train cao hơn.
 
 Mặc định train ghi cảnh báo nếu lớp không xuất hiện trong validation. Dùng
 `--require-all-classes-in-val` để dừng hẳn thay vì tiếp tục; đây là lựa chọn nên dùng
