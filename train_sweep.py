@@ -41,6 +41,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--save-period", type=int, default=1)
     parser.add_argument("--cache", default="ram", choices=["ram", "disk", "False"])
     parser.add_argument("--no-amp", action="store_true")
+    parser.add_argument("--fast", action="store_true",
+                        help="Optimize CUDA throughput; disables deterministic algorithms")
     parser.add_argument("--require-all-classes-in-val", action="store_true")
     return parser
 
@@ -85,6 +87,8 @@ def main() -> None:
         ]
         if args.no_amp:
             command.append("--no-amp")
+        if args.fast:
+            command.append("--fast")
         if args.require_all_classes_in_val:
             command.append("--require-all-classes-in-val")
         log_path = sweep_dir / f"{candidate_name}.log"

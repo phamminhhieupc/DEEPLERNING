@@ -128,25 +128,28 @@ Notebook mặc định hỗ trợ clone **repo public** không cần token. Vớ
 clone bằng phương thức xác thực an toàn của bạn trước, rồi chỉ chạy phần cài dependency
 và các cell tiếp theo; không chèn token vào `REPO_URL` hoặc lưu nó trong notebook.
 
-## 5. Cấu hình train
+## 5. Cấu hình train tối ưu cho T4
 
 | Biến notebook | Mặc định | Ý nghĩa |
 |---|---|---|
 | MODEL | yolo26s.pt | Pretrained; `yolo26n.pt` cho screening nhanh |
 | EPOCHS | 200 | Train cuối; screening dùng 80 |
 | PATIENCE | 35 | Train cuối; screening dùng 15 |
-| BATCH | 4 | Train cuối; screening T4 có thể dùng 8, giảm khi OOM |
+| BATCH | 8 | Screening T4 ở `imgsz=640`; train cuối thử 4/8, giảm khi OOM |
 | IMGSZ | 960 | Train cuối; screening dùng 640 để nhanh hơn |
 | WORKERS | 4 | Tăng tốc cấp dữ liệu cho T4; nếu DataLoader lỗi, đặt 0 |
 | CACHE | ram | Cache ảnh trong RAM; đổi `disk`/`False` nếu thiếu RAM |
-Lần đầu nên đặt `EPOCHS = 1`, `BATCH = 2`, `CACHE = "False"` để kiểm tra môi trường, pretrained download,
-Lần đầu nên đặt `EPOCHS = 1`, `BATCH = 2`, `CACHE = "False"` để kiểm tra môi trường, pretrained download,
+| FAST | true | Bật cuDNN benchmark và tắt deterministic để tăng throughput T4 |
+
+Lần đầu nên đặt `EPOCHS = 1`, `BATCH = 2`, `CACHE = "False"`, `FAST = False` để kiểm tra môi trường, pretrained download,
 nhãn và đầu ra. Sau khi thành công, đổi về giá trị train thật và chạy lại **cell train**:
 
 ### Profile screening nhanh và train cuối
 
 Để giảm thời gian mỗi epoch trên T4, dataset phải được giải nén ở `/content/ppe_dataset`,
-không đọc ảnh trực tiếp từ Google Drive. Screening nhanh ghi kết quả tạm vào `/content`:
+không đọc ảnh trực tiếp từ Google Drive. Cả checkpoint và log cũng được ghi vào `/content`
+trong lúc train; sau khi hoàn tất mới copy sang Drive. Cách này tránh Drive I/O làm GPU chờ.
+Ultralytics đã bật AMP FP16 khi dùng GPU; không cần tự thêm `GradScaler`.
 
 ```bash
 %cd /content/ppe-project
@@ -154,7 +157,7 @@ không đọc ảnh trực tiếp từ Google Drive. Screening nhanh ghi kết q
   --data /content/ppe_dataset/data.yaml \
   --model yolo26n.pt --epochs 80 --patience 15 \
   --imgsz 640 --batch 8 --workers 4 --cache ram \
-  --save-period 5 --device 0 \
+  --save-period 5 --device 0 --fast \
   --project /content/runs_fast --name ppe_yolo26n_640_screening
 ```
 
@@ -165,7 +168,9 @@ Copy kết quả screening lên Drive sau khi hoàn tất:
   /content/drive/MyDrive/PPE/runs/
 ```
 
-Train cuối dùng model lớn hơn và ảnh lớn hơn:
+Hoặc dùng `sync_run(...)` như ví dụ ở train cuối để copy cả thư mục run và file log.
+
+Train cuối dùng model lớn hơn và ảnh lớn hơn. Vẫn ghi run local trước:
 
 ```bash
 %cd /content/ppe-project
@@ -173,8 +178,19 @@ Train cuối dùng model lớn hơn và ảnh lớn hơn:
   --data /content/ppe_dataset/data.yaml \
   --model yolo26s.pt --epochs 200 --patience 35 \
   --imgsz 960 --batch 4 --workers 4 --cache ram \
-  --save-period 1 --device 0 \
-  --project /content/drive/MyDrive/PPE/runs --name ppe_yolo26s_960_final
+  --save-period 1 --device 0 --fast \
+  --project /content/runs_final --name ppe_yolo26s_960_final
+```
+
+Sau khi train xong và có `summary.json`, đồng bộ run lên Drive:
+
+```python
+from colab_utils import sync_run
+sync_run(
+    "/content/runs_final/ppe_yolo26s_960_final",
+    "/content/runs_final/console_ppe_yolo26s_960_final.log",
+    "/content/drive/MyDrive/PPE/runs",
+)
 ```
 
 Nếu bị OOM, giảm `batch` 4 → 2, đổi `yolo26s` thành `yolo26n`, rồi mới giảm `imgsz`.
@@ -182,10 +198,32 @@ Nếu RAM không đủ, dùng `--cache disk`; nếu disk cache cũng không phù
 `--cache False`. Theo dõi T4 bằng `!nvidia-smi` và `!nvidia-smi dmon -s pucm`.
 tên run có timestamp mới, không ghi đè. Không cần giải nén lại dataset.
 
-Script in tham số trước khi train, dùng AMP trên GPU, workers=4 và cache RAM để tận dụng T4,
+Script in tham số trước khi train, dùng AMP FP16 trên GPU, workers=4, cache RAM và fast profile để tận dụng T4,
 đồng thời lưu checkpoint theo validation mAP50–95, dừng sớm
 khi không cải thiện nghiêm ngặt (điểm bằng nhau không reset patience), đánh giá lại
 best model trên val/test nếu test tồn tại. Test không chọn model.
+
+Sau mỗi epoch, console in loss train/val, mũi tên thay đổi, Precision/Recall/mAP/F1,
+`★ BEST`, thời gian epoch/trung bình/ETA, tốc độ iteration, peak GPU memory,
+đường dẫn/dung lượng `last.pt` và `best.pt`. Các file log gồm:
+
+```text
+epoch_metrics.jsonl
+epoch_metrics.csv
+epoch_log.csv
+```
+
+`epoch_log.csv` là file phẳng để vẽ lại, có thêm thời gian, ETA, GPU memory,
+checkpoint và cảnh báo. `Objectness` chỉ được in khi bản YOLO đang dùng thực sự
+cung cấp loss đó. GPU memory dùng `torch.cuda.max_memory_allocated()`/
+`max_memory_reserved()` và reset peak stats sau mỗi epoch; CPU sẽ hiển thị `CPU mode`.
+Nếu val loss tăng liên tục ít nhất 5 epoch trong khi train loss giảm, script cảnh báo
+overfitting. `--map-patience 10` cảnh báo plateau mAP, còn `--patience` vẫn quyết định
+early stopping.
+
+Sau mỗi epoch console hiển thị riêng phần `TRAIN` loss và `VAL` loss/precision/recall/mAP.
+Sau khi chọn `best_val.pt`, script in `[FINAL VAL]` và `[FINAL TEST]` kèm metric tổng hợp
+và metric từng lớp. Test chỉ chạy một lần cuối, không chạy sau mỗi epoch.
 
 `requirements.txt` cho phép phiên bản Ultralytics trong dải hỗ trợ; môi trường và
 `pip freeze` được ghi trong từng run, cùng Git commit trong `environment.json`.
@@ -231,6 +269,8 @@ Không dùng đường dẫn `/home/hieupc/...` trên Colab; mọi đường d�
 - **Repo đã tồn tại**: không chạy lại cell clone; dùng các cell tiếp theo. Muốn lấy mã mới,
   chủ động `git pull`/checkout và restart session trước khi import lại module.
 - **CUDA out of memory**: giảm BATCH, IMGSZ hoặc dùng YOLO26n; restart runtime nếu GPU vẫn giữ bộ nhớ.
+- **GPU utilization thấp**: xác nhận dataset/run nằm trên `/content`, tăng BATCH đến khi VRAM khoảng 90–95%,
+  rồi thử WORKERS=4/6. Không tăng workers vô hạn; nếu CPU/RAM quá tải thì giảm xuống 2.
 - **DataLoader worker lỗi**: WORKERS=0.
 - **Run already exists**: đổi RUN_NAME; notebook tự tạo timestamp mới mỗi lần chạy cell train.
 - **Colab ngắt kết nối**: `/content` có thể mất, nhưng checkpoint đã ghi vào Drive được giữ lại.

@@ -9,6 +9,7 @@ import math
 import platform
 import subprocess
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -193,6 +194,36 @@ def _numeric_values(values: Any) -> dict[str, float]:
     }
 
 
+def _loss_values(trainer: Any, value: Any, prefix: str) -> dict[str, float]:
+    """Read loss values across Ultralytics versions.
+
+    YOLOv8/YOLO11 commonly expose ``tloss`` as a tensor and provide
+    ``label_loss_items`` to name it.  Other versions expose a mapping directly.
+    Missing loss families, including objectness on YOLOv8/YOLO11, are omitted.
+    """
+    values = _numeric_values(value)
+    if values:
+        return values
+    label_loss_items = getattr(trainer, "label_loss_items", None)
+    if callable(label_loss_items):
+        for kwargs in ({"prefix": prefix}, {}):
+            try:
+                values = _numeric_values(label_loss_items(value, **kwargs))
+            except (TypeError, ValueError, RuntimeError):
+                continue
+            if values:
+                return values
+    return {}
+
+
+def _first_value(*mappings: dict[str, float], keys: tuple[str, ...]) -> float | None:
+    for mapping in mappings:
+        for key in keys:
+            if key in mapping:
+                return mapping[key]
+    return None
+
+
 def build_epoch_record(trainer: Any, epoch: int) -> dict[str, Any]:
     """Build an auditable per-epoch train/validation/lr record.
 
@@ -201,49 +232,183 @@ def build_epoch_record(trainer: Any, epoch: int) -> dict[str, Any]:
     Ultralytics version exposes them.  Raw mappings are retained so no precision
     is lost even when a particular version uses different metric names.
     """
-    train_losses = _numeric_values(getattr(trainer, "tloss", {}))
+    train_losses = _loss_values(trainer, getattr(trainer, "tloss", {}), "train")
     validation = _numeric_values(getattr(trainer, "metrics", {}))
+    validator = getattr(trainer, "validator", None)
+    val_losses = _loss_values(trainer, getattr(validator, "loss", {}), "val")
+    val_loss_items = _loss_values(trainer, getattr(validator, "loss_items", {}), "val")
+    val_losses = {**val_loss_items, **val_losses}
+    validation_losses = {**val_losses, **{
+        key: value for key, value in validation.items() if "loss" in key.lower()
+    }}
     learning_rates = _numeric_values(getattr(trainer, "lr", {}))
     record: dict[str, Any] = {
         "epoch": epoch,
         "train_loss": train_losses,
-        "validation": validation,
+        "validation": {**validation, **validation_losses},
         "learning_rate": learning_rates,
     }
+    if train_losses:
+        record["train_total_loss"] = sum(train_losses.values())
     aliases = {
         "train_box_loss": ("train/box_loss", "box_loss"),
         "train_cls_loss": ("train/cls_loss", "cls_loss"),
         "train_dfl_loss": ("train/dfl_loss", "dfl_loss"),
-        "val_box_loss": ("val/box_loss", "validation/box_loss"),
-        "val_cls_loss": ("val/cls_loss", "validation/cls_loss"),
-        "val_dfl_loss": ("val/dfl_loss", "validation/dfl_loss"),
+        "train_obj_loss": ("train/obj_loss", "obj_loss", "objectness_loss"),
+        "val_box_loss": ("val/box_loss", "validation/box_loss", "box_loss"),
+        "val_cls_loss": ("val/cls_loss", "validation/cls_loss", "cls_loss"),
+        "val_dfl_loss": ("val/dfl_loss", "validation/dfl_loss", "dfl_loss"),
+        "val_obj_loss": ("val/obj_loss", "validation/obj_loss", "obj_loss", "objectness_loss"),
         "precision": ("metrics/precision(B)", "metrics/precision"),
         "recall": ("metrics/recall(B)", "metrics/recall"),
         "mAP50": ("metrics/mAP50(B)", "metrics/mAP50"),
         "mAP50_95": ("metrics/mAP50-95(B)", "metrics/mAP50-95"),
     }
     for output, keys in aliases.items():
-        for key in keys:
-            value = train_losses.get(key) or validation.get(key)
-            if value is not None:
-                record[output] = value
-                break
+        value = _first_value(
+            train_losses if output.startswith("train_") else validation_losses,
+            validation if output in {"precision", "recall", "mAP50", "mAP50_95"} else {},
+            keys=keys,
+        )
+        if value is not None:
+            record[output] = value
+    if "precision" in record and "recall" in record and record["precision"] + record["recall"] > 0:
+        record["f1"] = 2 * record["precision"] * record["recall"] / (record["precision"] + record["recall"])
+    val_loss_keys = ("val_box_loss", "val_cls_loss", "val_dfl_loss", "val_obj_loss")
+    available_val_losses = [record[key] for key in val_loss_keys if key in record]
+    if available_val_losses:
+        record["val_total_loss"] = sum(available_val_losses)
     return record
 
 
-def append_epoch_record(path: str | Path, record: dict[str, Any]) -> None:
+def _shown(record: dict[str, Any], key: str) -> str:
+    value = record.get(key)
+    return f"{value:.6f}" if isinstance(value, (int, float)) else "N/A"
+
+
+def _delta(record: dict[str, Any], previous: dict[str, Any] | None, key: str) -> str:
+    current = record.get(key)
+    old = previous.get(key) if previous else None
+    if not isinstance(current, (int, float)) or not isinstance(old, (int, float)):
+        return ""
+    if current > old:
+        return " ↑"
+    if current < old:
+        return " ↓"
+    return " →"
+
+
+def _seconds(value: Any) -> str:
+    if not isinstance(value, (int, float)) or value < 0:
+        return "N/A"
+    value = int(round(value))
+    hours, remainder = divmod(value, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    if hours:
+        return f"{hours}h {minutes:02d}m {seconds:02d}s"
+    return f"{minutes}m {seconds:02d}s"
+
+
+def _file_info(path: str | Path) -> tuple[str, str]:
+    path = Path(path)
+    if not path.is_file():
+        return str(path), "N/A"
+    return str(path), f"{path.stat().st_size / (1024 ** 2):.2f}"
+
+
+def _gpu_memory(torch: Any) -> dict[str, Any]:
+    """Read and reset CUDA peak memory without failing in CPU mode."""
+    if not getattr(torch, "cuda", None) or not torch.cuda.is_available():
+        return {"gpu_status": "CPU mode"}
+    try:
+        allocated = torch.cuda.max_memory_allocated() / (1024 ** 3)
+        reserved = torch.cuda.max_memory_reserved() / (1024 ** 3)
+        total = torch.cuda.get_device_properties(0).total_memory / (1024 ** 3)
+        values = {
+            "gpu_status": torch.cuda.get_device_name(0),
+            "gpu_memory_allocated_gb": allocated,
+            "gpu_memory_reserved_gb": reserved,
+            "gpu_memory_total_gb": total,
+        }
+    except (AttributeError, RuntimeError, TypeError):
+        values = {"gpu_status": "GPU memory unavailable"}
+    finally:
+        try:
+            torch.cuda.reset_peak_memory_stats()
+        except (AttributeError, RuntimeError):
+            pass
+    return values
+
+
+def format_epoch_summary(record: dict[str, Any], total_epochs: int, best: float | None,
+                         bad_epochs: int, patience: int,
+                         previous: dict[str, Any] | None = None) -> str:
+    """Format a readable train/validation summary for one completed epoch."""
+    epoch = int(record["epoch"])
+    train_obj = f" obj={_shown(record, 'train_obj_loss')}{_delta(record, previous, 'train_obj_loss')}" \
+        if "train_obj_loss" in record else ""
+    val_obj = f" obj={_shown(record, 'val_obj_loss')}{_delta(record, previous, 'val_obj_loss')}" \
+        if "val_obj_loss" in record else ""
+    best_marker = record.get("best_marker", "")
+    return (
+        f"[EPOCH {epoch:03d}/{total_epochs}]\n"
+        f"  TRAIN: box={_shown(record, 'train_box_loss')}{_delta(record, previous, 'train_box_loss')} "
+        f"cls={_shown(record, 'train_cls_loss')}{_delta(record, previous, 'train_cls_loss')} "
+        f"dfl={_shown(record, 'train_dfl_loss')}{_delta(record, previous, 'train_dfl_loss')}"
+        f"{train_obj} "
+        f"total={_shown(record, 'train_total_loss')}\n"
+        f"  VAL  : box={_shown(record, 'val_box_loss')}{_delta(record, previous, 'val_box_loss')} "
+        f"cls={_shown(record, 'val_cls_loss')}{_delta(record, previous, 'val_cls_loss')} "
+        f"dfl={_shown(record, 'val_dfl_loss')}{_delta(record, previous, 'val_dfl_loss')}"
+        f"{val_obj} "
+        f"P={_shown(record, 'precision')} "
+        f"R={_shown(record, 'recall')} "
+        f"mAP50={_shown(record, 'mAP50')} "
+        f"mAP50-95={_shown(record, 'mAP50_95')} F1={_shown(record, 'f1')}\n"
+        f"  BEST : {best_marker} fitness={_shown(record, 'fitness')} "
+        f"best={_shown({'value': record.get('best_fitness', best)}, 'value')} "
+        f"epoch={record.get('best_fitness_epoch', 'N/A')} "
+        f"mAP_no_improvement={bad_epochs}/{patience}\n"
+        f"  SPEED: epoch={_seconds(record.get('epoch_seconds'))} "
+        f"avg={_seconds(record.get('avg_epoch_seconds'))} "
+        f"ETA={_seconds(record.get('eta_seconds'))} "
+        f"iteration={_shown(record, 'iterations_per_second')} it/s\n"
+        f"  GPU  : {record.get('gpu_status', 'CPU mode')} "
+        f"allocated={_shown(record, 'gpu_memory_allocated_gb')}GB "
+        f"reserved={_shown(record, 'gpu_memory_reserved_gb')}GB "
+        f"total={_shown(record, 'gpu_memory_total_gb')}GB\n"
+        f"  FILES: last.pt={record.get('last_checkpoint', 'N/A')} "
+        f"({record.get('last_checkpoint_mb', 'N/A')}MB), "
+        f"best.pt={record.get('best_checkpoint', 'N/A')} "
+        f"({record.get('best_checkpoint_mb', 'N/A')}MB)\n"
+        f"  RUNS : {record.get('save_dir', 'N/A')} "
+        f"results={record.get('results_csv', 'N/A')} plots={record.get('plots_dir', 'N/A')}"
+        + (f"\n  WARNING: {record['warning']}" if record.get("warning") else "")
+    )
+
+
+def append_epoch_record(path: str | Path, record: dict[str, Any],
+                        csv_name: str | None = None,
+                        write_jsonl: bool = True) -> None:
     """Append one full-precision JSONL and CSV epoch record for easy inspection."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(record, ensure_ascii=False, allow_nan=False) + "\n")
-        handle.flush()
+    if write_jsonl:
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record, ensure_ascii=False, allow_nan=False) + "\n")
+            handle.flush()
     columns = [
         "epoch", "train_box_loss", "train_cls_loss", "train_dfl_loss",
-        "val_box_loss", "val_cls_loss", "val_dfl_loss", "precision", "recall",
-        "mAP50", "mAP50_95",
+        "train_obj_loss", "train_total_loss", "val_box_loss", "val_cls_loss",
+        "val_dfl_loss", "val_obj_loss", "val_total_loss", "precision", "recall",
+        "mAP50", "mAP50_95", "f1", "fitness", "best_fitness", "map_bad_epochs",
+        "best_fitness_epoch", "best_marker", "epoch_seconds", "avg_epoch_seconds", "eta_seconds",
+        "iterations_per_second", "gpu_memory_allocated_gb", "gpu_memory_reserved_gb",
+        "gpu_memory_total_gb", "gpu_status", "last_checkpoint", "last_checkpoint_mb",
+        "best_checkpoint", "best_checkpoint_mb", "save_dir", "results_csv", "plots_dir",
+        "warning",
     ]
-    csv_path = path.with_suffix(".csv")
+    csv_path = path.with_name(csv_name) if csv_name else path.with_suffix(".csv")
     with csv_path.open("a", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=columns, extrasaction="ignore")
         if handle.tell() == 0:
@@ -327,6 +492,31 @@ def evaluate_checkpoint(checkpoint: str | Path, data_yaml: str | Path, split: st
     return evaluation
 
 
+def print_final_evaluation(evaluation: dict[str, Any]) -> None:
+    """Print a compact aggregate and per-class report for a final split evaluation."""
+    metrics = evaluation["metrics"]
+    print(f"\n[FINAL {evaluation['split'].upper()}]", flush=True)
+    print(
+        "  precision={:.6f} recall={:.6f} mAP50={:.6f} mAP50-95={:.6f}".format(
+            float(metrics.get("metrics/precision(B)", float("nan"))),
+            float(metrics.get("metrics/recall(B)", float("nan"))),
+            float(metrics.get("metrics/mAP50(B)", float("nan"))),
+            float(metrics.get(PRIMARY_METRIC, float("nan"))),
+        ),
+        flush=True,
+    )
+    if evaluation["per_class"]:
+        print("  per-class:", flush=True)
+        for item in evaluation["per_class"]:
+            print(
+                "    [{:02d}] {:<24} P={:.4f} R={:.4f} mAP50={:.4f} mAP50-95={:.4f}".format(
+                    item["id"], item["name"], item["precision"], item["recall"],
+                    item["mAP50"], item["mAP50_95"],
+                ),
+                flush=True,
+            )
+
+
 def _capture_environment() -> dict[str, Any]:
     import torch
     import ultralytics
@@ -355,11 +545,17 @@ def _capture_environment() -> dict[str, Any]:
 
 
 def build_train_config(args: argparse.Namespace, resolved_yaml: Path, run_dir: Path) -> dict[str, Any]:
-    """Build a conservative configuration suitable for small PPE objects."""
+    """Build the Ultralytics configuration used for one training run.
+
+    ``--fast`` deliberately disables deterministic CUDA algorithms.  This is
+    useful on Colab T4 where deterministic execution can reduce throughput;
+    the seed is still recorded in the run metadata.
+    """
     return {
         "data": str(resolved_yaml), "epochs": args.epochs, "patience": args.patience,
+        "map_patience": args.map_patience,
         "imgsz": args.imgsz, "batch": args.batch, "workers": args.workers,
-        "device": args.device, "seed": args.seed, "deterministic": True,
+        "device": args.device, "seed": args.seed, "deterministic": not args.fast,
         "project": str(run_dir.parent), "name": run_dir.name, "exist_ok": True,
         "save": True, "save_period": args.save_period, "plots": True, "val": True,
         "pretrained": True, "cache": args.cache, "optimizer": args.optimizer,
@@ -382,6 +578,12 @@ def train_one(args: argparse.Namespace) -> Path:
         raise RuntimeError("GPU unavailable. Select a Colab GPU or use --device cpu explicitly")
     if "," in args.device:
         raise ValueError("Use one GPU or cpu; this pipeline selects one checkpoint per run")
+    if args.device != "cpu" and args.fast:
+        # T4 benefits from Tensor Cores (AMP) and from allowing cuDNN to pick
+        # the fastest convolution algorithm for a fixed image size.
+        torch.backends.cudnn.benchmark = True
+        if hasattr(torch, "set_float32_matmul_precision"):
+            torch.set_float32_matmul_precision("high")
     data, report = validate_dataset(args.data)
     val_counts = report["val"]["objects_per_class"]
     missing_val = [name for index, name in data["names"].items() if val_counts[str(index)] == 0]
@@ -406,31 +608,103 @@ def train_one(args: argparse.Namespace) -> Path:
 
     monitor = PlateauMonitor(args.patience)
     epoch_log = run_dir / "epoch_metrics.jsonl"
+    epoch_csv = run_dir / "epoch_log.csv"
+    previous_record: dict[str, Any] | None = None
+    epoch_durations: list[float] = []
+    last_callback = time.perf_counter()
+    overfit_epochs = 0
+    best_fitness: float | None = None
+    best_fitness_epoch: int | None = None
+    best_map: float | None = None
+    map_bad_epochs = 0
 
     def record_epoch(trainer: Any) -> None:
+        nonlocal previous_record, last_callback, overfit_epochs
+        nonlocal best_fitness, best_fitness_epoch, best_map, map_bad_epochs
         epoch = int(getattr(trainer, "epoch", monitor.last_epoch - 1)) + 1
         if epoch <= monitor.last_epoch:
             return
         record = build_epoch_record(trainer, epoch)
-        append_epoch_record(epoch_log, record)
-        score = _metric_value(getattr(trainer, "metrics", {}) or {}, PRIMARY_METRIC)
+        now = time.perf_counter()
+        epoch_seconds = _float_value(getattr(trainer, "epoch_time", None)) or (now - last_callback)
+        last_callback = now
+        epoch_durations.append(max(epoch_seconds, 0.0))
+        avg_seconds = sum(epoch_durations) / len(epoch_durations)
+        record.update({
+            "epoch_seconds": epoch_seconds,
+            "avg_epoch_seconds": avg_seconds,
+            "eta_seconds": max(args.epochs - epoch, 0) * avg_seconds,
+        })
+        try:
+            iterations = len(getattr(trainer, "train_loader", None))
+        except TypeError:
+            iterations = None
+        if iterations and epoch_seconds > 0:
+            record["iterations_per_second"] = iterations / epoch_seconds
+        record.update(_gpu_memory(torch))
+
+        score = record.get("mAP50_95")
         if score is None:
+            score = _metric_value(getattr(trainer, "metrics", {}) or {}, PRIMARY_METRIC)
+        fitness = _float_value(getattr(trainer, "fitness", None))
+        if fitness is None:
+            fitness = score
+        is_best = fitness is not None and (best_fitness is None or fitness > best_fitness)
+        if is_best:
+            best_fitness, best_fitness_epoch = fitness, epoch
+        if score is not None and (best_map is None or score > best_map):
+            best_map, map_bad_epochs = score, 0
+        elif score is not None:
+            map_bad_epochs += 1
+        if fitness is None:
             print(f"[PPE] epoch={epoch} loss/metrics logged; {PRIMARY_METRIC} unavailable", flush=True)
-            return
-        should_stop = monitor.update(epoch, score)
+            should_stop = False
+        else:
+            # Early stopping remains tied to validation mAP, not a version-specific
+            # Ultralytics fitness formula.
+            should_stop = monitor.update(epoch, score if score is not None else fitness)
+            record["fitness"] = fitness
+        record["best_fitness"] = best_fitness
+        record["best_fitness_epoch"] = best_fitness_epoch
+        record["map_bad_epochs"] = map_bad_epochs
+        record["best_marker"] = "★ BEST" if is_best else ""
+
+        if (previous_record and record.get("train_total_loss") is not None and
+                record.get("val_total_loss") is not None and
+                record["train_total_loss"] < previous_record.get("train_total_loss", float("inf")) and
+                record["val_total_loss"] > previous_record.get("val_total_loss", float("-inf"))):
+            overfit_epochs += 1
+        else:
+            overfit_epochs = 0
+        warnings: list[str] = []
+        if overfit_epochs >= 5:
+            warnings.append(f"nghi overfitting: val loss tăng {overfit_epochs} epoch liên tục, train loss giảm")
+        if map_bad_epochs >= args.map_patience:
+            warnings.append(f"mAP không cải thiện {map_bad_epochs} epoch; sắp early stopping (ngưỡng={args.map_patience})")
+        record["warning"] = " | ".join(warnings)
+
+        weights_dir = run_dir / "weights"
+        last_path, last_mb = _file_info(weights_dir / "last.pt")
+        best_path, best_mb = _file_info(weights_dir / "best.pt")
+        record.update({
+            "last_checkpoint": last_path, "last_checkpoint_mb": last_mb,
+            "best_checkpoint": best_path, "best_checkpoint_mb": best_mb,
+            "save_dir": str(run_dir), "results_csv": str(run_dir / "results.csv"),
+            "plots_dir": str(run_dir),
+        })
+        append_epoch_record(epoch_log, record)
+        append_epoch_record(epoch_log, record, csv_name=epoch_csv.name, write_jsonl=False)
         write_json(run_dir / "early_stopping.json", monitor.state())
-        fields = " ".join(
-            f"{key}={record[key]:.6f}"
-            for key in ("train_box_loss", "train_cls_loss", "train_dfl_loss",
-                        "val_box_loss", "val_cls_loss", "val_dfl_loss",
-                        "precision", "recall", "mAP50", "mAP50_95")
-            if key in record
-        )
-        print(f"[PPE] epoch={epoch} {fields} val_mAP50-95={score:.6f} "
-              f"best={monitor.best:.6f} no_improvement={monitor.bad_epochs}/{monitor.patience}", flush=True)
+        print(format_epoch_summary(record, args.epochs, monitor.best,
+                                   monitor.bad_epochs, monitor.patience, previous_record), flush=True)
+        if is_best and fitness is not None:
+            print(f"[PPE] best.pt vừa được cập nhật: fitness={fitness:.6f}, epoch={epoch}", flush=True)
+        if record["warning"]:
+            print(f"[PPE] WARNING: {record['warning']}", flush=True)
         if should_stop:
             trainer.stop = True
             print("[PPE] Early stopping: validation mAP did not improve.", flush=True)
+        previous_record = record
 
     try:
         model = YOLO(args.model)
@@ -441,11 +715,13 @@ def train_one(args: argparse.Namespace) -> Path:
             best_path, resolved_yaml, "val", run_dir / "best_val",
             args.imgsz, args.batch, args.device, args.workers,
         )}
+        print_final_evaluation(evaluations["val"])
         if not args.skip_test and "test" in data:
             evaluations["test"] = evaluate_checkpoint(
                 best_path, resolved_yaml, "test", run_dir / "best_test",
                 args.imgsz, args.batch, args.device, args.workers,
             )
+            print_final_evaluation(evaluations["test"])
         score = _metric_value(evaluations["val"]["metrics"], PRIMARY_METRIC)
         if score is None:
             raise RuntimeError(f"Validation did not return {PRIMARY_METRIC}")
@@ -474,6 +750,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--model", default="yolo26s.pt")
     parser.add_argument("--epochs", type=int, default=200)
     parser.add_argument("--patience", type=int, default=35)
+    parser.add_argument("--map-patience", type=int, default=10,
+                        help="Warn after this many epochs without mAP improvement")
     parser.add_argument("--imgsz", type=int, default=960)
     parser.add_argument("--batch", type=int, default=4,
                         help="Batch size; use -1 for Ultralytics auto-batch")
@@ -493,6 +771,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--cache", default="ram", choices=["ram", "disk", "False"],
                         help="ram speeds repeated epochs but uses system RAM")
     parser.add_argument("--no-amp", action="store_true")
+    parser.add_argument("--fast", action="store_true",
+                        help="Optimize CUDA throughput; disables deterministic algorithms")
     parser.add_argument("--require-all-classes-in-val", action="store_true")
     parser.add_argument("--skip-test", action="store_true", help="Do not evaluate test after this run")
     return parser
@@ -503,8 +783,9 @@ def main() -> None:
     args = parser.parse_args()
     if args.cache == "False":
         args.cache = False
-    if args.epochs < 1 or args.patience < 1 or args.imgsz < 32 or args.batch < -1 or args.workers < 0:
-        parser.error("epochs/patience/imgsz must be positive, batch must be >= -1, workers must be non-negative")
+    if (args.epochs < 1 or args.patience < 1 or args.map_patience < 1 or args.imgsz < 32
+            or args.batch < -1 or args.workers < 0):
+        parser.error("epochs/patience/map-patience/imgsz must be positive, batch must be >= -1, workers must be non-negative")
     if Path(args.name).name != args.name or args.name in ("", ".", ".."):
         parser.error("name must be one directory name")
     train_one(args)

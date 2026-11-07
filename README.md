@@ -248,7 +248,7 @@ chạy nhiều giờ:
   --data /content/ppe_dataset/data.yaml \
   --model yolo26n.pt \
   --epochs 1 --patience 1 \
-  --imgsz 640 --batch 2 --workers 0 --cache False --device 0 \
+  --imgsz 640 --batch 2 --workers 0 --cache False --device 0 --fast \
   --project /content/runs_fast \
   --name smoke_01
 ```
@@ -272,7 +272,7 @@ epoch để kiểm tra dataset/model, chưa phải kết quả cuối:
   --model yolo26n.pt \
   --epochs 80 --patience 15 \
   --imgsz 640 --batch 8 --workers 4 --cache ram \
-  --save-period 5 --device 0 \
+  --save-period 5 --device 0 --fast \
   --project /content/runs_fast \
   --name ppe_yolo26n_640_screening
 ```
@@ -298,31 +298,41 @@ Sau khi cấu hình screening ổn định, train model chất lượng cao hơn
   --model yolo26s.pt \
   --epochs 200 --patience 35 \
   --imgsz 960 --batch 4 --workers 4 --cache ram \
-  --save-period 1 --device 0 \
-  --project /content/drive/MyDrive/PPE/runs \
+  --save-period 1 --device 0 --fast \
+  --project /content/runs_final \
   --name ppe_yolo26s_960_final
 ```
 
-Nếu ưu tiên tốc độ ghi file hơn việc giữ checkpoint trực tiếp trên Drive, có thể đổi
-`--project` thành `/content/runs_final`, rồi copy toàn bộ run sang Drive sau khi train.
+Sau khi train xong, đồng bộ run và log lên Drive:
+
+```python
+from colab_utils import sync_run
+sync_run(
+    "/content/runs_final/ppe_yolo26s_960_final",
+    "/content/runs_final/console_ppe_yolo26s_960_final.log",
+    "/content/drive/MyDrive/PPE/runs",
+)
+```
 
 Nếu bị OOM, giảm theo thứ tự: `batch 4 → 2`, đổi `yolo26s → yolo26n`, rồi mới giảm
 `imgsz 960 → 640`.
 
 ### Profile GPU T4, tăng tốc epoch và log loss
 
-T4 là một GPU; không truyền nhiều ID vào `--device`. Tăng tốc chủ yếu bằng AMP,
-DataLoader workers và cache ảnh trong RAM. Profile mặc định phù hợp để bắt đầu:
+T4 là một GPU; không truyền nhiều ID vào `--device`. Ultralytics tự dùng AMP FP16
+khi `device=0`; tăng tốc thêm bằng DataLoader workers, cache ảnh trong RAM và `--fast`.
+Profile phù hợp để bắt đầu:
 
 ```text
-device=0, amp=true, workers=4, cache=ram, batch=4, imgsz=960
+device=0, amp=true, workers=4, cache=ram, fast=true, batch=4, imgsz=960
 ```
 
 Nếu RAM Colab không đủ, đổi `--cache ram` thành `--cache disk` hoặc `--cache False`.
 Nếu hết VRAM, giảm `batch` xuống 2 trước khi giảm `imgsz`.
 
-Không train trực tiếp từ thư mục Google Drive dataset. Dataset phải được giải nén vào
-`/content/ppe_dataset`; chỉ lưu checkpoint/log lên Drive sau đó. Theo dõi GPU bằng:
+Không train trực tiếp từ thư mục Google Drive dataset và không ghi checkpoint mỗi epoch lên Drive.
+Dataset phải được giải nén vào `/content/ppe_dataset`; train vào `/content/runs_*`,
+sau đó đồng bộ cả run lên Drive. Theo dõi GPU bằng:
 
 ```bash
 !nvidia-smi
@@ -337,11 +347,50 @@ Mỗi epoch ghi đầy đủ vào:
 ```text
 epoch_metrics.jsonl   # dữ liệu loss/metric đầy đủ, không làm tròn
 epoch_metrics.csv     # dễ mở bằng pandas/Excel
+epoch_log.csv         # log phẳng: loss, metric, F1, tốc độ, ETA, GPU memory, checkpoint
 ```
 
 Các trường chính gồm `train_box_loss`, `train_cls_loss`, `train_dfl_loss`,
 `val_box_loss`, `val_cls_loss`, `val_dfl_loss`, `precision`, `recall`, `mAP50`,
-`mAP50_95` và learning rate. Màn hình console cũng in các trường có sẵn sau mỗi epoch.
+`mAP50_95`, `f1`, `epoch_seconds`, `eta_seconds`, `gpu_memory_allocated_gb`,
+`gpu_memory_reserved_gb` và đường dẫn checkpoint. Objectness chỉ xuất hiện khi
+phiên bản YOLO cung cấp loss này; YOLOv8/YOLO11 không có thì không in.
+Màn hình console cũng in mũi tên thay đổi so với epoch trước, `★ BEST`, tốc độ,
+GPU memory và cảnh báo overfitting/plateau sau mỗi epoch.
+
+Console hiển thị dạng:
+
+```text
+[EPOCH 001/200]
+  TRAIN: box=... cls=... dfl=... total=...
+  VAL  : box=... cls=... dfl=... P=... R=... mAP50=... mAP50-95=... F1=...
+  BEST : ★ BEST fitness=... best=... epoch=1 mAP_no_improvement=0/35
+  SPEED: epoch=... avg=... ETA=... iteration=... it/s
+  GPU  : Tesla T4 allocated=...GB reserved=...GB total=...GB
+  FILES: last.pt=... best.pt=...
+  RUNS : ... results=... plots=...
+```
+
+Mặc định `--map-patience 10` sẽ cảnh báo khi mAP không cải thiện 10 epoch;
+đây chỉ là cảnh báo, còn early stopping thực tế vẫn dùng `--patience`. Có thể đổi:
+
+```bash
+--map-patience 15
+```
+
+Sau khi train, script in riêng:
+
+```text
+[FINAL VAL]
+  precision=... recall=... mAP50=... mAP50-95=...
+  per-class:
+    [01] helmet ...
+[FINAL TEST]
+  precision=... recall=... mAP50=... mAP50-95=...
+```
+
+`FINAL TEST` chỉ chạy một lần sau khi chọn `best_val.pt`; test không chạy sau mỗi epoch
+để tránh làm chậm train và tránh dùng test để chọn checkpoint.
 
 ### Bước 9 — Chạy sweep để chọn model tốt nhất
 
@@ -353,9 +402,12 @@ Các trường chính gồm `train_box_loss`, `train_cls_loss`, `train_dfl_loss`
   --data /content/ppe_dataset/data.yaml \
   --models yolo26n.pt,yolo26s.pt \
   --imgszs 640,960 \
-  --epochs 200 --patience 35 \
-  --batch 4 --workers 4 --cache ram --device 0 \
+  --epochs 200 --patience 35 --batch 4 --workers 4 --cache ram --device 0 --fast \
+  --project /content/runs_sweeps
   --project /content/drive/MyDrive/PPE/sweeps
+
+Sweep cũng nên chạy trên `/content`; sau khi chọn champion, copy thư mục
+`/content/runs_sweeps/sweep_<timestamp>` lên `/content/drive/MyDrive/PPE/sweeps`.
 ```
 
 Sweep chạy tuần tự từng candidate và chọn theo `metrics/mAP50-95(B)` trên validation.
@@ -377,8 +429,8 @@ Nếu GPU yếu, bắt đầu bằng:
 !python train_sweep.py \
   --data /content/ppe_dataset/data.yaml \
   --models yolo26n.pt --imgszs 640 \
-  --epochs 100 --patience 20 --batch 2 --workers 0 --device 0 \
-  --project /content/drive/MyDrive/PPE/sweeps
+  --epochs 100 --patience 20 --batch 2 --workers 0 --device 0 --fast \
+  --project /content/runs_sweeps
 ```
 
 ### Bước 10 — Tải model về máy

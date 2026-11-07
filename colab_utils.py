@@ -2,6 +2,7 @@
 import argparse
 import hashlib
 import json
+import shutil
 from pathlib import Path
 import stat
 import subprocess
@@ -73,7 +74,8 @@ def prepare_dataset(archive, destination, expected_sha256=None):
 
 
 def run_training(repo, data, project, name, model="yolo26s.pt", epochs=200,
-                 patience=35, batch=4, imgsz=960, workers=4, device="0", cache="ram"):
+                 patience=35, batch=4, imgsz=960, workers=4, device="0", cache="ram",
+                 fast=True, sync_to=None):
     repo, project = Path(repo).resolve(), Path(project).resolve()
     if Path(name).name != name or name in ("", ".", ".."):
         raise ValueError("Run name must be one directory name")
@@ -85,6 +87,8 @@ def run_training(repo, data, project, name, model="yolo26s.pt", epochs=200,
                "--epochs", str(epochs), "--patience", str(patience), "--batch", str(batch),
                "--imgsz", str(imgsz), "--workers", str(workers), "--device", device,
                "--cache", cache]
+    if fast:
+        command.append("--fast")
     with (project / f"console_{name}.log").open("x") as log:
         process = subprocess.Popen(command, cwd=repo, stdout=subprocess.PIPE,
                                    stderr=subprocess.STDOUT, text=True, bufsize=1)
@@ -106,7 +110,33 @@ def run_training(repo, data, project, name, model="yolo26s.pt", epochs=200,
             process.stdout.close()
     if code:
         raise RuntimeError(f"Training exited with {code}; inspect {project / f'console_{name}.log'}")
+    run_dir = project / name
+    if sync_to is not None:
+        synced = sync_run(run_dir, project / f"console_{name}.log", sync_to)
+        print(f"Synced run to {synced}", flush=True)
     return project / name
+
+
+def sync_run(run_dir, log_path, destination):
+    """Copy a completed local run to Drive without training on Drive I/O.
+
+    The destination is a project directory, for example
+    ``/content/drive/MyDrive/PPE/runs``.  Existing run names are rejected so
+    a completed experiment cannot be silently overwritten.
+    """
+    run_dir = Path(run_dir).resolve()
+    log_path = Path(log_path).resolve()
+    destination = Path(destination).resolve()
+    if not run_dir.is_dir():
+        raise FileNotFoundError(f"Run directory does not exist: {run_dir}")
+    destination.mkdir(parents=True, exist_ok=True)
+    target = destination / run_dir.name
+    if target.exists():
+        raise FileExistsError(f"Destination run already exists: {target}")
+    shutil.copytree(run_dir, target)
+    if log_path.is_file():
+        shutil.copy2(log_path, destination / log_path.name)
+    return target
 
 
 def main():

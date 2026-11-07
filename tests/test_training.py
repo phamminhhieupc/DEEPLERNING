@@ -10,6 +10,7 @@ from train_ppe import (
     PlateauMonitor,
     append_epoch_record,
     build_epoch_record,
+    format_epoch_summary,
     select_checkpoint_by_validation,
     validate_dataset,
     write_json,
@@ -96,6 +97,38 @@ class MonitorTests(unittest.TestCase):
         self.assertEqual(record["train_cls_loss"], 0.5)
         self.assertEqual(record["mAP50_95"], 0.75)
 
+    def test_epoch_record_computes_f1_and_omits_objectness_when_missing(self):
+        class Trainer:
+            tloss = {"box_loss": 1.0, "cls_loss": 0.5, "dfl_loss": 0.25}
+            metrics = {
+                "metrics/precision(B)": 0.8,
+                "metrics/recall(B)": 0.6,
+                "metrics/mAP50(B)": 0.7,
+                "metrics/mAP50-95(B)": 0.4,
+            }
+            lr = {}
+
+        record = build_epoch_record(Trainer(), 1)
+        self.assertAlmostEqual(record["f1"], 0.6857142857, places=6)
+        self.assertNotIn("train_obj_loss", record)
+        self.assertNotIn("val_obj_loss", record)
+
+    def test_epoch_summary_shows_loss_direction_and_best_marker(self):
+        previous = {"train_box_loss": 1.0, "val_box_loss": 0.5}
+        record = {
+            "epoch": 2, "train_box_loss": 0.8, "train_cls_loss": 0.4,
+            "train_dfl_loss": 0.2, "val_box_loss": 0.6, "val_cls_loss": 0.3,
+            "val_dfl_loss": 0.2, "precision": 0.8, "recall": 0.7,
+            "mAP50": 0.75, "mAP50_95": 0.55, "f1": 0.746,
+            "fitness": 0.55, "best_fitness": 0.55, "best_fitness_epoch": 2,
+            "best_marker": "★ BEST", "gpu_status": "CPU mode",
+        }
+        text = format_epoch_summary(record, 10, 0.55, 0, 10, previous)
+        self.assertIn("★ BEST", text)
+        self.assertIn("box=0.800000 ↓", text)
+        self.assertIn("box=0.600000 ↑", text)
+        self.assertIn("CPU mode", text)
+
     def test_epoch_record_writes_jsonl_and_csv(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "epoch_metrics.jsonl"
@@ -103,6 +136,28 @@ class MonitorTests(unittest.TestCase):
             self.assertIn('"epoch": 1', path.read_text())
             csv_path = path.with_suffix(".csv")
             self.assertIn("epoch,train_box_loss", csv_path.read_text())
+
+    def test_epoch_log_csv_can_be_written_without_duplicate_jsonl(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "epoch_metrics.jsonl"
+            append_epoch_record(
+                path, {"epoch": 1, "train_box_loss": 1.0},
+                csv_name="epoch_log.csv", write_jsonl=False,
+            )
+            self.assertFalse(path.exists())
+            self.assertIn("epoch,train_box_loss", (Path(tmp) / "epoch_log.csv").read_text())
+
+    def test_epoch_summary_is_readable(self):
+        text = format_epoch_summary(
+            {"epoch": 1, "train_box_loss": 1.0, "train_cls_loss": 0.5,
+             "train_dfl_loss": 0.25, "train_total_loss": 1.75,
+             "precision": 0.8, "recall": 0.7, "mAP50": 0.75, "mAP50_95": 0.5},
+            10, 0.5, 0, 3,
+        )
+        self.assertIn("[EPOCH 001/10]", text)
+        self.assertIn("TRAIN:", text)
+        self.assertIn("VAL", text)
+        self.assertIn("mAP50-95=0.500000", text)
 
 
 @unittest.skipUnless(importlib.util.find_spec("yaml"), "Install requirements.txt for dataset tests")

@@ -6,7 +6,7 @@ import unittest
 import zipfile
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from colab_utils import pack_dataset, prepare_dataset, run_training
+from colab_utils import pack_dataset, prepare_dataset, run_training, sync_run
 
 
 class ColabTests(unittest.TestCase):
@@ -63,6 +63,21 @@ class ColabTests(unittest.TestCase):
         output = run_training(repo, self.source / "data.yaml", project, "smoke", device="cpu")
         self.assertTrue(output.is_dir())
         self.assertIn("training smoke log", (project / "console_smoke.log").read_text())
+
+    def test_sync_run_copies_run_and_log_without_overwrite(self):
+        run = self.root / "runs" / "smoke"
+        run.mkdir(parents=True)
+        (run / "summary.json").write_text("{}")
+        log = self.root / "runs" / "console_smoke.log"
+        log.write_text("log")
+        destination = self.root / "drive" / "runs"
+
+        target = sync_run(run, log, destination)
+        self.assertEqual(target, destination / "smoke")
+        self.assertTrue((target / "summary.json").is_file())
+        self.assertEqual((destination / "console_smoke.log").read_text(), "log")
+        with self.assertRaises(FileExistsError):
+            sync_run(run, log, destination)
 
     def test_failed_subprocess_is_reported(self):
         repo = self.root / "repo"
