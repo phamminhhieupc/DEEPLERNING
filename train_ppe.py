@@ -553,7 +553,6 @@ def build_train_config(args: argparse.Namespace, resolved_yaml: Path, run_dir: P
     """
     return {
         "data": str(resolved_yaml), "epochs": args.epochs, "patience": args.patience,
-        "map_patience": args.map_patience,
         "imgsz": args.imgsz, "batch": args.batch, "workers": args.workers,
         "device": args.device, "seed": args.seed, "deterministic": not args.fast,
         "project": str(run_dir.parent), "name": run_dir.name, "exist_ok": True,
@@ -602,7 +601,12 @@ def train_one(args: argparse.Namespace) -> Path:
         "\n".join(environment["pip_freeze"]) + "\n", encoding="utf-8"
     )
     config = build_train_config(args, resolved_yaml, run_dir)
-    write_json(run_dir / "requested_config.json", {"model": args.model, "selection_metric": PRIMARY_METRIC, **config})
+    write_json(run_dir / "requested_config.json", {
+        "model": args.model,
+        "selection_metric": PRIMARY_METRIC,
+        "monitoring": {"map_patience": args.map_patience},
+        **config,
+    })
     if missing_val:
         write_json(run_dir / "quality_warnings.json", {"classes_missing_from_val": missing_val})
 
